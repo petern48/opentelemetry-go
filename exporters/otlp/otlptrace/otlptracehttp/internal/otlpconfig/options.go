@@ -49,6 +49,7 @@ type (
 		Compression Compression
 		Timeout     time.Duration
 		URLPath     string
+		Marshaler   Marshaler
 
 		// gRPC configurations
 		GRPCCredentials credentials.TransportCredentials
@@ -81,6 +82,7 @@ func NewHTTPConfig(opts ...HTTPOption) Config {
 			URLPath:     DefaultTracesPath,
 			Compression: NoCompression,
 			Timeout:     DefaultTimeout,
+			Marshaler:   MarshalProto,
 		},
 		RetryConfig: retry.DefaultConfig,
 	}
@@ -355,6 +357,13 @@ func WithProxy(pf HTTPTransportProxyFunc) GenericOption {
 func WithHTTPClient(c *http.Client) GenericOption {
 	return newGenericOption(func(cfg Config) Config {
 		cfg.Traces.HTTPClient = c
+		return cfg
+	})
+}
+
+func WithMarshaler(m Marshaler) HTTPOption {
+	return NewHTTPOption(func(cfg Config) Config {
+		cfg.Traces.Marshaler = m
 		return cfg
 	})
 }

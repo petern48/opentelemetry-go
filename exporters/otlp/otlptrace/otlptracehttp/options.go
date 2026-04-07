@@ -17,6 +17,9 @@ import (
 // collector.
 type Compression otlpconfig.Compression
 
+// Encoding describes the encoding used for payloads sent to the collector.
+type Encoding otlpconfig.Marshaler
+
 // HTTPTransportProxyFunc is a function that resolves which URL to use as proxy for a given request.
 // This type is compatible with http.Transport.Proxy and can be used to set a custom proxy function
 // to the OTLP HTTP client.
@@ -29,6 +32,13 @@ const (
 	// GzipCompression tells the driver to send payloads after
 	// compressing them with gzip.
 	GzipCompression = Compression(otlpconfig.GzipCompression)
+)
+
+const (
+	// EncodingProtobuf tells the driver to send payloads using protobuf encoding.
+	EncodingProtobuf = Encoding(otlpconfig.MarshalProto)
+	// EncodingJSON tells the driver to send payloads using JSON encoding.
+	EncodingJSON = Encoding(otlpconfig.MarshalJSON)
 )
 
 // Option applies an option to the HTTP client.
@@ -168,4 +178,10 @@ func WithProxy(pf HTTPTransportProxyFunc) Option {
 // cause the client to be instrumented twice and cause infinite recursion.
 func WithHTTPClient(c *http.Client) Option {
 	return wrappedOption{otlpconfig.WithHTTPClient(c)}
+}
+
+// WithEncoding tells the driver to serialize the payload using the specified
+// encoding. If unset, [EncodingProtobuf] is used.
+func WithEncoding(encoding Encoding) Option {
+	return wrappedOption{otlpconfig.WithMarshaler(otlpconfig.Marshaler(encoding))}
 }

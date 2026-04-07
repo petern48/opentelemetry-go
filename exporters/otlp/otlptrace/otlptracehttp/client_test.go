@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -492,6 +493,109 @@ func TestCollectorRespondingNonProtobufContent(t *testing.T) {
 	err = exporter.ExportSpans(ctx, otlptracetest.SingleReadOnlySpan())
 	assert.NoError(t, err)
 	assert.Len(t, mc.GetSpans(), 1)
+}
+
+func TestClientWithJSONEncoding(t *testing.T) {
+	var capturedContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedContentType = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	driver := otlptracehttp.NewClient(
+		otlptracehttp.WithEndpoint(u.Host),
+		otlptracehttp.WithInsecure(),
+		otlptracehttp.WithEncoding(otlptracehttp.EncodingJSON),
+	)
+	ctx := t.Context()
+	exporter, err := otlptrace.New(ctx, driver)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, exporter.Shutdown(t.Context())) }()
+
+	err = exporter.ExportSpans(ctx, otlptracetest.SingleReadOnlySpan())
+	require.NoError(t, err)
+
+	assert.Equal(t, "application/json", capturedContentType)
+}
+
+func TestClientJSONEncodingParsesJSONResponsePartialSuccess(t *testing.T) {
+	const wantN int64 = 4
+	const wantMsg = "dropped"
+	tests := []struct {
+		contentType string
+	}{
+		{contentType: "application/json"},
+		{contentType: "application/json; charset=utf-8"},
+	}
+	for _, test := range tests {
+		t.Run(test.contentType, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				resp := &coltracepb.ExportTraceServiceResponse{
+					PartialSuccess: &coltracepb.ExportTracePartialSuccess{
+						RejectedSpans: wantN,
+						ErrorMessage:  wantMsg,
+					},
+				}
+				body, err := protojson.Marshal(resp)
+				require.NoError(t, err)
+				w.Header().Set("Content-Type", test.contentType)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(body)
+			}))
+			t.Cleanup(srv.Close)
+
+			u, err := url.Parse(srv.URL)
+			require.NoError(t, err)
+
+			driver := otlptracehttp.NewClient(
+				otlptracehttp.WithEndpoint(u.Host),
+				otlptracehttp.WithInsecure(),
+				otlptracehttp.WithEncoding(otlptracehttp.EncodingJSON),
+			)
+			ctx := t.Context()
+			exporter, err := otlptrace.New(ctx, driver)
+			require.NoError(t, err)
+			defer func() { assert.NoError(t, exporter.Shutdown(t.Context())) }()
+
+			wantErr := internal.TracePartialSuccessError(wantN, wantMsg)
+			assert.ErrorIs(t, exporter.ExportSpans(ctx, otlptracetest.SingleReadOnlySpan()), wantErr)
+		})
+	}
+}
+
+func TestClientWithJSONEncodingAndGzipCompression(t *testing.T) {
+	var capturedHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	driver := otlptracehttp.NewClient(
+		otlptracehttp.WithEndpoint(u.Host),
+		otlptracehttp.WithInsecure(),
+		otlptracehttp.WithEncoding(otlptracehttp.EncodingJSON),
+		otlptracehttp.WithCompression(otlptracehttp.GzipCompression),
+	)
+	ctx := t.Context()
+	exporter, err := otlptrace.New(ctx, driver)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, exporter.Shutdown(t.Context())) }()
+
+	err = exporter.ExportSpans(ctx, otlptracetest.SingleReadOnlySpan())
+	require.NoError(t, err)
+
+	assert.Equal(t, "application/json", capturedHeaders.Get("Content-Type"))
+	assert.Equal(t, "gzip", capturedHeaders.Get("Content-Encoding"))
 }
 
 func TestClientInstrumentation(t *testing.T) {

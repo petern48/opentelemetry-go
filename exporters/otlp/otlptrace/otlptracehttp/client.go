@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -30,7 +32,10 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/retry"
 )
 
-const contentTypeProto = "application/x-protobuf"
+const (
+	contentTypeProto = "application/x-protobuf"
+	contentTypeJSON  = "application/json"
+)
 
 // maxResponseBodySize is the maximum number of bytes to read from a response
 // body. It is set to 4 MiB per the OTLP specification recommendation to
@@ -160,7 +165,15 @@ func (d *client) UploadTraces(ctx context.Context, protoSpans []*tracepb.Resourc
 	pbRequest := &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: protoSpans,
 	}
-	rawRequest, err := proto.Marshal(pbRequest)
+
+	var rawRequest []byte
+	var err error
+	switch otlpconfig.Marshaler(d.cfg.Marshaler) {
+	case otlpconfig.MarshalJSON:
+		rawRequest, err = protojson.Marshal(pbRequest)
+	default:
+		rawRequest, err = proto.Marshal(pbRequest)
+	}
 	if err != nil {
 		return err
 	}
@@ -221,19 +234,30 @@ func (d *client) UploadTraces(ctx context.Context, protoSpans []*tracepb.Resourc
 				return nil
 			}
 
-			if resp.Header.Get("Content-Type") == "application/x-protobuf" {
-				var respProto coltracepb.ExportTraceServiceResponse
-				if err := proto.Unmarshal(respData.Bytes(), &respProto); err != nil {
-					return err
-				}
+			// Read the media type from the Content-Type header, dropping
+			// parameters (e.g. charset), so we match application/json or
+			// application/x-protobuf
+			mediatype, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+			if err != nil {
+				mediatype = ""
+			}
+			var respProto coltracepb.ExportTraceServiceResponse
+			switch mediatype {
+			case contentTypeProto:
+				err = proto.Unmarshal(respData.Bytes(), &respProto)
+			case contentTypeJSON:
+				err = protojson.Unmarshal(respData.Bytes(), &respProto)
+			}
+			if err != nil {
+				return err
+			}
 
-				if respProto.PartialSuccess != nil {
-					msg := respProto.PartialSuccess.GetErrorMessage()
-					n := respProto.PartialSuccess.GetRejectedSpans()
-					if n != 0 || msg != "" {
-						err := internal.TracePartialSuccessError(n, msg)
-						uploadErr = errors.Join(uploadErr, err)
-					}
+			if respProto.PartialSuccess != nil {
+				msg := respProto.PartialSuccess.GetErrorMessage()
+				n := respProto.PartialSuccess.GetRejectedSpans()
+				if n != 0 || msg != "" {
+					err := internal.TracePartialSuccessError(n, msg)
+					uploadErr = errors.Join(uploadErr, err)
 				}
 			}
 			return nil
@@ -279,13 +303,22 @@ func (d *client) newRequest(body []byte) (request, error) {
 		return request{Request: r}, err
 	}
 
-	userAgent := "OTel OTLP Exporter Go/" + otlptrace.Version()
+	var userAgent string
+	var contentType string
+	switch otlpconfig.Marshaler(d.cfg.Marshaler) {
+	case otlpconfig.MarshalJSON:
+		userAgent = "OTel Go OTLP over HTTP/JSON traces exporter/" + otlptrace.Version()
+		contentType = contentTypeJSON
+	default:
+		userAgent = "OTel Go OTLP over HTTP/protobuf traces exporter/" + otlptrace.Version()
+		contentType = contentTypeProto
+	}
 	r.Header.Set("User-Agent", userAgent)
 
 	for k, v := range d.cfg.Headers {
 		r.Header.Set(k, v)
 	}
-	r.Header.Set("Content-Type", contentTypeProto)
+	r.Header.Set("Content-Type", contentType)
 
 	req := request{Request: r}
 	switch Compression(d.cfg.Compression) {
